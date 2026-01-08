@@ -8,7 +8,8 @@ if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
 import json
-from arc_agi_benchmarking.adapters import ProviderAdapter, AnthropicAdapter, OpenAIAdapter, DeepseekAdapter, GeminiAdapter, HuggingFaceFireworksAdapter, FireworksAdapter, GrokAdapter, OpenRouterAdapter, XAIAdapter, RandomAdapter
+from pathlib import Path
+from arc_agi_benchmarking.adapters import ProviderAdapter, AnthropicAdapter, OpenAIAdapter, DeepseekAdapter, GeminiAdapter, HuggingFaceFireworksAdapter, FireworksAdapter, GrokAdapter, OpenRouterAdapter, XAIAdapter, RandomAdapter, ClaudeagentsdkAdapter
 from dotenv import load_dotenv
 import arc_agi_benchmarking.utils as utils
 from arc_agi_benchmarking.utils.metrics import timeit, set_metrics_enabled
@@ -22,6 +23,21 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+PROVIDER_ADAPTERS = {
+    "anthropic": AnthropicAdapter,
+    "openai": OpenAIAdapter,
+    "deepseek": DeepseekAdapter,
+    "gemini": GeminiAdapter,
+    "huggingfacefireworks": HuggingFaceFireworksAdapter,
+    "fireworks": FireworksAdapter,
+    "grok": GrokAdapter,
+    "openrouter": OpenRouterAdapter,
+    "xai": XAIAdapter,
+    "random": RandomAdapter,
+    "claudeagentsdk": ClaudeagentsdkAdapter,
+}
+
+
 class ARCTester:
     def __init__(self, config: str, save_submission_dir: str, overwrite_submission: bool, print_submission: bool, num_attempts: int, retry_attempts: int):
         self.config = config
@@ -34,28 +50,11 @@ class ARCTester:
         self.retry_attempts = retry_attempts
 
     def init_provider(self, provider_name: str) -> ProviderAdapter:
-        if provider_name == "anthropic":
-            return AnthropicAdapter(self.config)
-        elif provider_name == "openai":
-            return OpenAIAdapter(self.config)
-        elif provider_name == "deepseek":
-            return DeepseekAdapter(self.config)
-        elif provider_name == "gemini":
-            return GeminiAdapter(self.config)
-        elif provider_name == "huggingfacefireworks":
-            return HuggingFaceFireworksAdapter(self.config)
-        elif provider_name == "fireworks":
-            return FireworksAdapter(self.config)
-        elif provider_name == "grok":
-            return GrokAdapter(self.config)
-        elif provider_name == "openrouter":
-            return OpenRouterAdapter(self.config)
-        elif provider_name == "xai":
-            return XAIAdapter(self.config)
-        elif provider_name == "random":
-            return RandomAdapter(self.config)
-        else:
+        try:
+            adapter_cls = PROVIDER_ADAPTERS[provider_name]
+        except KeyError:
             raise ValueError(f"Unsupported provider: {provider_name}")
+        return adapter_cls(self.config)
         
     def predict_task_output(self, training_pairs: List[ARCPair], test_input: ARCPair, task_id: str, test_id: str, pair_index: int):
         """
@@ -260,6 +259,26 @@ def main_cli(cli_args: Optional[List[str]] = None):
     # Set metrics enabled status based on CLI arg first
     set_metrics_enabled(args.enable_metrics)
 
+    # # Prepare OpenAI SDK file logging in logs/<config>/<task_id>/openai.jsonl
+    log_dir = Path("logs") / args.config / args.task_id
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "openai.jsonl"
+
+    class _JsonFormatter(logging.Formatter):
+        def format(self, record):
+            payload = {
+                "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
+                "level": record.levelname,
+                "logger": record.name,
+                "message": record.getMessage(),
+            }
+            if record.exc_info:
+                payload["exc_info"] = self.formatException(record.exc_info)
+            return json.dumps(payload)
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(_JsonFormatter())
+
     # Configure logging
     if args.verbose:
         # Verbose mode: Show DEBUG for our code, WARNING+ for libraries
@@ -270,7 +289,7 @@ def main_cli(cli_args: Optional[List[str]] = None):
         
         # Set library loggers to WARNING to reduce noise
         library_loggers = [
-            'openai', 'httpx', 'httpcore', 'urllib3', 'requests', 
+            'httpx', 'httpcore', 'urllib3', 'requests', 
             'anthropic', 'google', 'pydantic', 'transformers'
         ]
         for lib_logger in library_loggers:
@@ -287,6 +306,13 @@ def main_cli(cli_args: Optional[List[str]] = None):
             level=getattr(logging, args.log_level.upper()),
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
+
+    # Attach file handler for OpenAI SDK and app logs, and ensure OpenAI logger is enabled
+    root_logger = logging.getLogger()
+    root_logger.addHandler(file_handler)
+    openai_logger = logging.getLogger('openai')
+    openai_logger.setLevel(logging.INFO)
+    logger.info(f"OpenAI SDK logs will be written to {log_path}")
 
     arc_solver = ARCTester(
         config=args.config,
